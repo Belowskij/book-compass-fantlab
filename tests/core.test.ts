@@ -6,6 +6,9 @@ import { nextBook, sequence, serialize, validateImport } from "../src/data";
 import type { Library } from "../src/types";
 import { BACKUP_KEY, RECOVERY_KEY, decodeStoredLibrary, readLibrary, writeLibrary } from "../src/storage";
 import { STORAGE_KEY } from "../src/data";
+import { validatePlans, moveBook, listProgress, serializeWorkspace, importPlans, type ReadingList } from "../src/plans";
+import { loadCycleProgress } from "../src/cycle-progress";
+import { recoveryIssues } from "../src/storage";
 const children = fixture.children.map(book);
 const read = (ids: number[]): Library =>
   Object.fromEntries(
@@ -145,6 +148,35 @@ test("browser access denial is distinct from malformed JSON; large local librari
   assert.equal(Object.keys(decodeStoredLibrary(raw).library).length, 5001);
   assert.throws(() => validateImport(JSON.parse(raw)), /5000/);
 });
+test("custom order stays independent of bibliography; current reading anchors next; shared status drives progress", () => {
+  const list: ReadingList={id:'my-route',name:'Мой маршрут',books:[children.find(b=>b.id===3)!,children.find(b=>b.id===1)!,children.find(b=>b.id===2)!],updatedAt:'2026-10-22T00:00:00Z'};
+  const library=read([3]);library[3].status='reading';
+  assert.equal(listProgress(list,library).next?.id,1);
+  library[3].status='read';library[1]={...read([1])[1],status:'reading'};
+  assert.equal(listProgress(list,library).next?.id,2);
+  assert.equal(listProgress(list,library).read,1);
+  const moved=moveBook(list,2,0);
+  assert.deepEqual(moved.books.map(b=>b.id),[2,3,1]);
+  assert.deepEqual(list.books.map(b=>b.id),[3,1,2]);
+});
+test("workspace export includes queues, selected route and deleted books; old exports stay compatible", () => {
+  const source=read([1,2]);
+  const plans={lists:[{id:'route',name:'Маршрут',books:[source[2].book,source[1].book],updatedAt:'2026-10-22T00:00:00Z'}],removed:[{item:source[1],deletedAt:'2026-10-22T00:00:00Z'}],activeId:'route'};
+  const exported=JSON.parse(serializeWorkspace(source,plans));
+  assert.deepEqual(importPlans(exported)?.lists[0].books.map(b=>b.id),[2,1]);
+  assert.equal(importPlans(exported)?.removed[0].item.status,'read');
+  assert.equal(importPlans(exported)?.activeId,'route');
+  assert.equal(validateImport(exported)[2].status,'read');
+  assert.equal(importPlans(JSON.parse(serialize(source))),undefined);
+  assert.throws(()=>validatePlans({version:1,lists:[{...plans.lists[0],books:[source[1].book,source[1].book]}]}),/без повторов/);
+  assert.throws(()=>validatePlans({version:1,lists:[{...plans.lists[0],books:[{...source[1].book,isGroup:true}]}]}),/отдельные произведения/);
+});
+test("recovery diagnostics identify a bad record without discarding the source or guessing its identity", () => {
+  const item=read([1])[1];
+  const raw=JSON.stringify({version:1,items:[item,{...item,book:{...item.book,id:null}}]});
+  assert.deepEqual(recoveryIssues(raw),[{index:2,name:'Гиперион',reason:'Отсутствует корректный номер произведения ФантЛаба.'}]);
+  assert.equal(decodeStoredLibrary(raw).library[1].status,'read');
+});
 test("proxy rejects invalid operations and identifiers before upstream request", async () => {
   for (const q of [
     "action=work&id=-1",
@@ -171,6 +203,19 @@ const cycleWork: Work = {
 const neverLoad = async (): Promise<Work> => {
   throw new Error("Inline contents should not cause an API request");
 };
+test("cycle shelf combines books under one root and counts expanded published works", async () => {
+  const library=read([1,2]);
+  const root={id:cycleWork.id,name:cycleWork.name,kind:cycleWork.kind};
+  for(const item of Object.values(library))item.parents=[root];
+  const result=await loadCycleProgress(library,async id=>{
+    assert.equal(id,cycleWork.id);
+    return cycleWork;
+  });
+  assert.equal(result.rows.length,1);
+  assert.deepEqual(result.rows[0].books.map(b=>b.id),[1,2,3,4,644]);
+  assert.equal(result.rows[0].books.filter(b=>library[b.id]?.status==='read').length,2);
+  assert.deepEqual(result.errors,[]);
+});
 test("marking a complete nested cycle expands five published works without cycle records or duplicates", async () => {
   const cycle = await expandCycle(cycleWork, neverLoad);
   assert.deepEqual(

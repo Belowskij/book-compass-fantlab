@@ -1,5 +1,6 @@
 import type { Book, Work, Library, LibraryItem, CycleRef } from "./types";
 import { cleanCycleRefs, cycleRefs, continuation, sequence } from "./data";
+import { expandCycle } from "./library";
 export function activeItems(library: Library) {
   return Object.values(library)
     .filter((i) => i.status === "reading" || i.status === "read")
@@ -34,6 +35,9 @@ export interface Suggestion {
   anchor: Book | undefined;
   priority: boolean;
   basis: Book[];
+  readCount: number;
+  total: number;
+  position: number;
 }
 export async function continuations(
   library: Library,
@@ -78,7 +82,8 @@ export async function continuations(
     try {
       const cycle = await load(row.ref.id);
       if (!cycle.isGroup) return undefined;
-      const ordered = sequence(cycle.children);
+      const expanded = await expandCycle(cycle, load);
+      const ordered = expanded.books.map(book => ({...book, depth: 1}));
       const basis = ordered.filter((b) =>
         ["reading", "read"].includes(library[b.id]?.status),
       );
@@ -86,7 +91,7 @@ export async function continuations(
         (i) => i.book.isGroup && i.status === "reading",
       );
       if (!basis.length && !readingGroup) return undefined;
-      const result = continuation(cycle.children, library);
+      const result = continuation(ordered, library);
       if (!result.book) return undefined;
       return {
         book: result.book,
@@ -95,6 +100,9 @@ export async function continuations(
         anchor: result.anchor,
         priority: !!result.anchor || readingGroup,
         basis,
+        readCount: ordered.filter(b=>library[b.id]?.status==="read").length,
+        total: ordered.length,
+        position: ordered.findIndex(b=>b.id===result.book!.id)+1,
       } satisfies Suggestion;
     } catch {
       errors.push(

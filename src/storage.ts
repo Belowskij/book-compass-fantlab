@@ -3,6 +3,24 @@ import type { Library } from "./types";
 
 export const BACKUP_KEY = `${STORAGE_KEY}-backup`;
 export const RECOVERY_KEY = `${STORAGE_KEY}-recovery`;
+export function readRecoverySource(): string | undefined {
+  try { return window.localStorage.getItem(RECOVERY_KEY) ?? undefined; } catch { return undefined; }
+}
+export function recoveryIssues(raw: string): {index:number;name:string;reason:string}[] {
+  try {
+    let value=JSON.parse(raw);if(typeof value==='string')value=JSON.parse(value);
+    const entries=Array.isArray(value)?value:Array.isArray(value?.items)?value.items:value&&typeof value==='object'?Object.values(value):[];
+    return entries.flatMap((entry: any,index:number)=>{
+      const b=entry?.book;
+      let reason='';
+      if(!b||typeof b!=='object')reason='В записи отсутствует карточка произведения.';
+      else if(!Number.isSafeInteger(Number(b.id))||Number(b.id)<=0)reason='Отсутствует корректный номер произведения ФантЛаба.';
+      else if(typeof b.name!=='string'||!b.name.trim())reason='В записи отсутствует название произведения.';
+      else if(!['unread','reading','read','want'].includes(entry.status))reason='Не удалось распознать статус чтения.';
+      return reason?[{index:index+1,name:typeof b?.name==='string'?b.name:'Без названия',reason}]:[];
+    });
+  } catch { return [{index:1,name:'Сохранённые данные',reason:'JSON повреждён: не удалось разобрать структуру файла.'}]; }
+}
 export interface LibraryRead {
   library: Library;
   error?: string;

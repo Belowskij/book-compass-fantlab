@@ -48,7 +48,9 @@ import {
   type Filters,
 } from "./Discovery";
 import { matchesFilters, continuation } from "./data";
-import { readLibrary, writeLibrary } from "./storage";
+import { readLibrary, writeLibrary, readRecoverySource, recoveryIssues } from "./storage";
+import { readPlans, writePlans, serializeWorkspace, importPlans, type Plans } from "./plans";
+import { AddToQueue, PersonalNext, ReadingPlans, RemovedBooks, CycleShelf, Progress } from "./Planning";
 import {
   descendants,
   isCycleRead,
@@ -57,7 +59,6 @@ import {
 } from "./library";
 import {
   api,
-  serialize,
   validateImport,
   nextBook,
   cycleRefs,
@@ -193,6 +194,9 @@ interface Common {
   openBook: (id: number) => void;
   save: (book: Book, status: Status, parents?: CycleRef[]) => void;
   savingIds: ReadonlySet<number>;
+  plans: Plans;
+  changePlans: (change: (current: Plans) => Plans) => boolean;
+  openPlans: () => void;
 }
 function BookCard({
   book,
@@ -290,6 +294,9 @@ function NextReads({
   openBook,
   save,
   compact = false,
+  plans,
+  changePlans,
+  openPlans,
 }: { compact?: boolean } & Common) {
   const readItems = activeItems(library).filter(
     (i) => !i.book.isGroup || i.status === "reading",
@@ -308,17 +315,20 @@ function NextReads({
     errors: string[];
     checked: number;
   }>(key, () => continuations(library, (id) => api<Work>("work", { id })));
+  const personal = <PersonalNext plans={plans} changePlans={changePlans} library={library} save={save} openBook={openBook} openPlans={openPlans}/>;
   if (!readItems.length)
     return (
+      <>{personal}
       <Empty icon={<Route size={29} />} title="Продолжения появятся здесь">
         <p>
           Добавьте книгу со статусом «Читаю» или «Прочитано». В первую очередь
           компас предложит продолжение того, что вы читаете сейчас.
         </p>
-      </Empty>
+      </Empty></>
     );
   return (
     <>
+      {personal}
       {result.loading ? (
         <Loading />
       ) : result.error ? (
@@ -348,6 +358,8 @@ function NextReads({
                       <ChevronRight size={14} />
                     </button>
                   </div>
+                  {s.anchor && <div className="reading-anchor"><span>Сейчас читаете</span><button onClick={() => openBook(s.anchor!.id)}>{s.anchor.name}</button><button className="text-button" onClick={() => save(s.anchor!, "read")}>Отметить прочитанной</button></div>}
+                  <p className="step-label">{s.anchor ? "Затем по библиографии ФантЛаба" : "Следующая непрочитанная"}</p>
                   <button
                     className="next-book"
                     onClick={() => openBook(s.book.id)}
@@ -380,6 +392,8 @@ function NextReads({
                       </span>
                     </div>
                   </button>
+                  <p className="next-basis">Книга {s.position} из {s.total} · порядок библиографии ФантЛаба</p>
+                  <Progress read={s.readCount} total={s.total}/>
                   <button
                     className="text-button start-reading"
                     onClick={() =>
@@ -817,7 +831,7 @@ function LibraryPage({
   ...common
 }: {
   remove: (id: number) => void;
-  importLibrary: (lib: Library) => void;
+  importLibrary: (lib: Library, plans?: Plans) => void;
   notify: (s: string) => void;
 } & Common) {
   const [filter, setFilter] = useState<Status | "all">("all");
@@ -829,7 +843,7 @@ function LibraryPage({
   const shown = items.filter((i) => filter === "all" || i.status === filter);
   const download = () => {
     const u = URL.createObjectURL(
-      new Blob([serialize(common.library)], { type: "application/json" }),
+      new Blob([serializeWorkspace(common.library, common.plans)], { type: "application/json" }),
     );
     const a = document.createElement("a");
     a.href = u;
@@ -871,8 +885,10 @@ function LibraryPage({
               try {
                 if (f.size > 5 * 1024 * 1024)
                   throw new Error("Файл слишком большой. Максимум — 5 МБ.");
-                const lib = validateImport(JSON.parse(await f.text()));
-                importLibrary(lib);
+                const data = JSON.parse(await f.text());
+                const lib = validateImport(data);
+                const plans = importPlans(data);
+                importLibrary(lib, plans);
               } catch (error) {
                 setFileError(
                   error instanceof SyntaxError
@@ -1187,6 +1203,7 @@ function WorkPage({
           </a>
         </div>
       </section>
+      <AddToQueue book={w} plans={common.plans} changePlans={common.changePlans}/>
       <div className="tabs" role="tablist" aria-label="О книге">
         <button
           role="tab"
@@ -1454,6 +1471,17 @@ export default function App() {
   const [initial] = useState(readLibrary);
   const [library, setLibrary] = useState<Library>(initial.library);
   const libraryRef = useRef(library);
+  const [initialPlans] = useState(readPlans);
+  const [plans, setPlans] = useState<Plans>(initialPlans.plans);
+  const plansRef = useRef(plans);
+  const [plansError, setPlansError] = useState(initialPlans.error ?? "");
+  const [libraryView, setLibraryView] = useState<"books" | "cycles" | "plans" | "removed">("books");
+  const changePlans = useCallback((change: (current: Plans) => Plans) => {
+    const next = change(plansRef.current);
+    try { writePlans(next); }
+    catch { setPlansError("Не удалось сохранить очереди или удалённые книги. Память сайта недоступна, заполнена или содержит нераспознанные данные. Изменение не сохранено."); return false; }
+    plansRef.current = next; setPlans(next); setPlansError(""); return true;
+  }, []);
   const [savingIds, setSavingIds] = useState<ReadonlySet<number>>(new Set());
   const [cycleError, setCycleError] = useState<{
     book: Book;
@@ -1462,7 +1490,7 @@ export default function App() {
   const operations = useRef(new Map<number, symbol>());
   const failedMigrations = useRef(new Map<number, LibraryItem>());
   const [storageError, setStorageError] = useState(initial.error ?? initial.warning ?? "");
-  const [storageSource, setStorageSource] = useState(initial.error || initial.warning ? initial.raw : undefined);
+  const [storageSource, setStorageSource] = useState(() => initial.error || initial.warning ? initial.raw : readRecoverySource());
   const [storageNoticeDismissed, setStorageNoticeDismissed] = useState(false);
   const [toast, setToast] = useState("");
   const [undo, setUndo] = useState<LibraryItem>();
@@ -1581,6 +1609,9 @@ export default function App() {
     operations.current.delete(id);
     setSavingIds((ids) => new Set([...ids].filter((value) => value !== id)));
     const prev = libraryRef.current[id];
+    if (!prev) return;
+    const previousPlans = plansRef.current;
+    if (!changePlans(current => ({...current, removed: [{item: prev, deletedAt: new Date().toISOString()}, ...current.removed.filter(row => row.item.book.id !== id)].slice(0,50)}))) return;
     const saved = update((current) => {
       const next = { ...current };
       delete next[id];
@@ -1589,6 +1620,14 @@ export default function App() {
     if (saved) {
       notify("Книга удалена из библиотеки");
       setUndo(prev);
+    } else changePlans(() => previousPlans);
+  };
+  const restore = (id: number) => {
+    const row = plansRef.current.removed.find(row => row.item.book.id === id);
+    if (!row) return;
+    if (update(current => ({...current, [id]: current[id] ?? row.item}))) {
+      changePlans(current => ({...current, removed: current.removed.filter(row => row.item.book.id !== id)}));
+      notify("Книга восстановлена с прежним статусом");
     }
   };
   const navigate = (state: RouteState) => {
@@ -1604,6 +1643,9 @@ export default function App() {
     library,
     save,
     savingIds,
+    plans,
+    changePlans,
+    openPlans: () => { setLibraryView("plans"); navigate({ page: "library" }); },
     openBook: (id: number) => navigate({ ...route, id, author: undefined }),
   };
   const back = () => {
@@ -1647,6 +1689,7 @@ export default function App() {
         </div>
       </header>
       <main className="main" id="main">
+        {plansError && <ErrorBox text={plansError}/>}
         {storageError && !storageNoticeDismissed && (
           <ErrorBox text={storageError} dismiss={() => setStorageNoticeDismissed(true)} retry={() => {
             const restored = readLibrary();
@@ -1693,15 +1736,29 @@ export default function App() {
         ) : route.page === "search" ? (
           <SearchPage initialQuery={route.q} {...common} />
         ) : route.page === "library" ? (
+          <>
+          <div className="library-view-tabs" role="tablist" aria-label="Разделы библиотеки">{([
+            ["books", "Книги"], ["cycles", "Циклы"], ["plans", "Мои очереди"], ["removed", "Удалённые"]
+          ] as const).map(([id,label])=><button key={id} role="tab" aria-selected={libraryView===id} onClick={()=>setLibraryView(id)}>{label}{id==="removed"&&plans.removed.filter(row=>!library[row.item.book.id]).length>0?` (${plans.removed.filter(row=>!library[row.item.book.id]).length})`:""}</button>)}</div>
+          {libraryView === "books" ? (
           <LibraryPage
             remove={remove}
-            importLibrary={(lib) => {
+            importLibrary={(lib, imported) => {
+              if (imported && !changePlans(current => ({...current,
+                lists: [...current.lists.filter(list => !imported.lists.some(other=>other.id===list.id)), ...imported.lists],
+                removed: [...imported.removed, ...current.removed.filter(row=>!imported.removed.some(other=>other.item.book.id===row.item.book.id))].slice(0,50),
+                activeId: imported.activeId ?? current.activeId,
+              }))) return;
               if (update((current) => ({ ...current, ...lib }), true))
                 notify(`Импортировано книг: ${Object.keys(lib).length}`);
             }}
             notify={notify}
             {...common}
           />
+          ) : libraryView === "cycles" ? <CycleShelf library={library} openBook={common.openBook}/>
+            : libraryView === "plans" ? <ReadingPlans {...common}/>
+            : <RemovedBooks plans={plans} library={library} restore={restore}/>}
+          </>
         ) : (
           <Recommendations {...common} />
         )}
@@ -1709,6 +1766,7 @@ export default function App() {
           <details className="recovery-details">
             <summary>Восстановление библиотеки</summary>
             <p>Исходные данные доступны для восстановления нераспознанных записей. Закрытие уведомления их не удаляет.</p>
+            {recoveryIssues(storageSource).map(issue=><p key={issue.index}><strong>Запись {issue.index}: {issue.name}.</strong> {issue.reason}</p>)}
             <button className="text-button" onClick={() => downloadRecovery(storageSource)}>Скачать исходные данные для восстановления</button>
           </details>
         )}
@@ -1743,13 +1801,10 @@ export default function App() {
           {undo && (
             <button
               onClick={() => {
-                if (update((current) => ({ ...current, [undo.book.id]: undo }))) {
-                  setUndo(undefined);
-                  notify("Книга возвращена");
-                }
+                restore(undo.book.id);
               }}
             >
-              Вернуть
+              Отменить удаление
             </button>
           )}
           <button

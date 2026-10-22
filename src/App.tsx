@@ -48,6 +48,7 @@ import {
   type Filters,
 } from "./Discovery";
 import { matchesFilters, continuation } from "./data";
+import { readLibrary, writeLibrary } from "./storage";
 import {
   descendants,
   isCycleRead,
@@ -56,10 +57,8 @@ import {
 } from "./library";
 import {
   api,
-  readLibrary,
   serialize,
   validateImport,
-  STORAGE_KEY,
   nextBook,
   cycleRefs,
   sequence,
@@ -118,7 +117,7 @@ function Loading() {
     </div>
   );
 }
-function ErrorBox({ text, retry }: { text: string; retry?: () => void }) {
+function ErrorBox({ text, retry, children }: { text: string; retry?: () => void; children?: ReactNode }) {
   return (
     <div className="error" role="alert">
       <AlertCircle size={21} />
@@ -129,6 +128,7 @@ function ErrorBox({ text, retry }: { text: string; retry?: () => void }) {
             Попробовать ещё раз
           </button>
         )}
+        {children}
       </div>
     </div>
   );
@@ -1452,7 +1452,8 @@ export default function App() {
   }>();
   const operations = useRef(new Map<number, symbol>());
   const failedMigrations = useRef(new Map<number, LibraryItem>());
-  const [storageError, setStorageError] = useState(initial.error ?? "");
+  const [storageError, setStorageError] = useState(initial.error ?? initial.warning ?? "");
+  const [storageSource, setStorageSource] = useState(initial.raw);
   const [toast, setToast] = useState("");
   const [undo, setUndo] = useState<LibraryItem>();
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -1478,19 +1479,23 @@ export default function App() {
       : `${nav.find((n) => n.id === route.page)?.label} — Книжный компас`;
   }, [route.page, route.id, route.author]);
   const update = useCallback(
-    (change: Library | ((current: Library) => Library)) => {
+    (change: Library | ((current: Library) => Library), allowRecovery = false) => {
       const next =
         typeof change === "function" ? change(libraryRef.current) : change;
-      libraryRef.current = next;
       try {
-        localStorage.setItem(STORAGE_KEY, serialize(next));
+        writeLibrary(next, undefined, allowRecovery);
         setStorageError("");
-      } catch {
+      } catch (error) {
         setStorageError(
-          "Браузер не разрешил сохранить библиотеку. Она доступна до закрытия страницы. Экспортируйте JSON, чтобы не потерять книги.",
+          error instanceof Error && !(error instanceof DOMException)
+            ? error.message
+            : "Изменение не сохранено: браузер запретил запись или память сайта заполнена. Ранее сохранённые книги не перезаписаны.",
         );
+        return false;
       }
+      libraryRef.current = next;
       setLibrary(next);
+      return true;
     },
     [],
   );
@@ -1507,7 +1512,8 @@ export default function App() {
         );
         if (operations.current.get(book.id) !== token) return;
         if (previous && libraryRef.current[book.id] !== previous) return;
-        update((current) => markCycleRead(current, expanded, changedAt));
+        if (!update((current) => markCycleRead(current, expanded, changedAt)))
+          throw new Error("Изменение не сохранено. Проверьте сообщение о памяти сайта выше.");
         failedMigrations.current.delete(book.id);
         notify(
           `«${book.name}»: прочитано произведений — ${expanded.books.length}`,
@@ -1549,7 +1555,7 @@ export default function App() {
     // A newer explicit action cancels any pending expansion of this cycle.
     operations.current.delete(book.id);
     setSavingIds((ids) => new Set([...ids].filter((id) => id !== book.id)));
-    update((current) => ({
+    const saved = update((current) => ({
       ...current,
       [book.id]: {
         book,
@@ -1558,19 +1564,21 @@ export default function App() {
         updatedAt: new Date().toISOString(),
       },
     }));
-    notify(`«${book.name}» → ${statuses[status]}`);
+    if (saved) notify(`«${book.name}» → ${statuses[status]}`);
   };
   const remove = (id: number) => {
     operations.current.delete(id);
     setSavingIds((ids) => new Set([...ids].filter((value) => value !== id)));
     const prev = libraryRef.current[id];
-    update((current) => {
+    const saved = update((current) => {
       const next = { ...current };
       delete next[id];
       return next;
     });
-    notify("Книга удалена из библиотеки");
-    setUndo(prev);
+    if (saved) {
+      notify("Книга удалена из библиотеки");
+      setUndo(prev);
+    }
   };
   const navigate = (state: RouteState) => {
     const u = new URL(location.origin);
@@ -1628,7 +1636,26 @@ export default function App() {
         </div>
       </header>
       <main className="main" id="main">
-        {storageError && <ErrorBox text={storageError} />}
+        {storageError && (
+          <ErrorBox text={storageError} retry={() => {
+            const restored = readLibrary();
+            setStorageSource(restored.raw);
+            setStorageError(restored.error ?? restored.warning ?? "");
+            if (!restored.error) {
+              libraryRef.current = restored.library;
+              setLibrary(restored.library);
+            }
+          }}>
+            {storageSource && <button className="text-button" onClick={() => {
+              const url = URL.createObjectURL(new Blob([storageSource], { type: "application/json" }));
+              const link = document.createElement("a");
+              link.href = url;
+              link.download = "knizhny-kompas-recovery.json";
+              link.click();
+              setTimeout(() => URL.revokeObjectURL(url), 1000);
+            }}>Скачать исходные данные для восстановления</button>}
+          </ErrorBox>
+        )}
         {cycleError && (
           <ErrorBox
             text={cycleError.message}
@@ -1664,8 +1691,8 @@ export default function App() {
           <LibraryPage
             remove={remove}
             importLibrary={(lib) => {
-              update((current) => ({ ...current, ...lib }));
-              notify(`Импортировано книг: ${Object.keys(lib).length}`);
+              if (update((current) => ({ ...current, ...lib }), true))
+                notify(`Импортировано книг: ${Object.keys(lib).length}`);
             }}
             notify={notify}
             {...common}
@@ -1704,9 +1731,10 @@ export default function App() {
           {undo && (
             <button
               onClick={() => {
-                update((current) => ({ ...current, [undo.book.id]: undo }));
-                setUndo(undefined);
-                notify("Книга возвращена");
+                if (update((current) => ({ ...current, [undo.book.id]: undo }))) {
+                  setUndo(undefined);
+                  notify("Книга возвращена");
+                }
               }}
             >
               Вернуть

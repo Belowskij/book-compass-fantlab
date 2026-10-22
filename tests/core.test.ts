@@ -4,6 +4,8 @@ import fixture from "./fixtures/hyperion.json";
 import { book, response } from "../server/fantlab";
 import { nextBook, sequence, serialize, validateImport } from "../src/data";
 import type { Library } from "../src/types";
+import { BACKUP_KEY, RECOVERY_KEY, decodeStoredLibrary, readLibrary, writeLibrary } from "../src/storage";
+import { STORAGE_KEY } from "../src/data";
 const children = fixture.children.map(book);
 const read = (ids: number[]): Library =>
   Object.fromEntries(
@@ -75,6 +77,73 @@ test("invalid imports fail atomically; untrusted images are discarded", () => {
     })[1].book.image,
     undefined,
   );
+});
+function memoryStorage(initial: Record<string, string> = {}) {
+  const values = new Map(Object.entries(initial));
+  return { values, getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => { values.set(key, value); } };
+}
+test("local recovery accepts old maps, numeric IDs and missing metadata without changing statuses", () => {
+  const item = read([1])[1];
+  const old = { 1: { ...item, book: { ...item.book, id: "1", authors: null }, parents: [null, {}] } };
+  const restored = decodeStoredLibrary(JSON.stringify(old));
+  assert.equal(restored.error, undefined);
+  assert.equal(restored.library[1].status, "read");
+  assert.deepEqual(restored.library[1].book.authors, []);
+  assert.deepEqual(restored.library[1].parents, []);
+  assert.ok(restored.warning);
+  assert.equal(decodeStoredLibrary(JSON.stringify(JSON.stringify(old))).library[1].book.id, 1);
+});
+test("one bad local record does not hide good books; raw source is archived before repair is saved", () => {
+  const raw = JSON.stringify({ version: 1, items: [...Object.values(read([1, 2])), null] });
+  const store = memoryStorage({ [STORAGE_KEY]: raw });
+  const result = readLibrary(store);
+  assert.equal(Object.keys(result.library).length, 2);
+  assert.ok(result.warning?.includes("1"));
+  assert.equal(store.getItem(STORAGE_KEY), raw);
+  writeLibrary(result.library, store);
+  assert.equal(store.getItem(RECOVERY_KEY), raw);
+  assert.equal(readLibrary(store).warning, undefined);
+  assert.equal(readLibrary(store).library[2].book.name, "Падение Гипериона");
+});
+test("unreadable source blocks ordinary edits; deliberate import archives it before replacement", () => {
+  const raw = '{"version":1,"items":[';
+  const store = memoryStorage({ [STORAGE_KEY]: raw });
+  assert.ok(readLibrary(store).error);
+  assert.throws(() => writeLibrary(read([1]), store), /Изменение не сохранено/);
+  assert.equal(store.getItem(STORAGE_KEY), raw);
+  writeLibrary(read([1]), store, true);
+  assert.equal(store.getItem(RECOVERY_KEY), raw);
+  assert.equal(readLibrary(store).library[1].status, "read");
+});
+test("last good automatic copy restores damaged primary; archive failure never replaces primary", () => {
+  const store = memoryStorage({ [STORAGE_KEY]: serialize(read([1])) });
+  writeLibrary(read([1, 2]), store);
+  assert.equal(decodeStoredLibrary(store.getItem(BACKUP_KEY)!).library[1].status, "read");
+  store.setItem(STORAGE_KEY, "broken");
+  const restored = readLibrary(store);
+  assert.equal(restored.library[1].status, "read");
+  assert.ok(restored.warning?.includes("автоматической копии"));
+  assert.equal(store.getItem(STORAGE_KEY), "broken");
+  assert.throws(() => writeLibrary(restored.library, { ...store, setItem: () => { throw new Error("QuotaExceededError"); } }));
+  assert.equal(store.getItem(STORAGE_KEY), "broken");
+  writeLibrary(restored.library, store);
+  assert.equal(store.getItem(RECOVERY_KEY), "broken");
+});
+test("browser access denial is distinct from malformed JSON; large local libraries do not hit file import limit", () => {
+  const blocked = readLibrary({ getItem: () => { throw new Error("SecurityError"); } });
+  assert.match(blocked.error!, /запретил доступ/);
+  assert.equal(blocked.raw, undefined);
+  let writes = 0;
+  assert.throws(() => writeLibrary(read([1]), {
+    getItem: () => { throw new Error("SecurityError"); },
+    setItem: () => { writes++; },
+  }, true));
+  assert.equal(writes, 0);
+  const item = read([1])[1];
+  const raw = JSON.stringify({ version: 1, items: Array.from({ length: 5001 }, (_, i) => ({ ...item, book: { ...item.book, id: i + 1 } })) });
+  assert.equal(Object.keys(decodeStoredLibrary(raw).library).length, 5001);
+  assert.throws(() => validateImport(JSON.parse(raw)), /5000/);
 });
 test("proxy rejects invalid operations and identifiers before upstream request", async () => {
   for (const q of [

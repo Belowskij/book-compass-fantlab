@@ -181,6 +181,7 @@ export function validateImport(data: unknown): Library {
       );
     const authors = b.authors
       .slice(0, 20)
+      .filter((a) => a && typeof a === "object")
       .map((a) => ({ id: Number(a.id) || 0, name: safeText(a.name) }));
     result[b.id] = {
       book: {
@@ -234,20 +235,6 @@ export function validateImport(data: unknown): Library {
     };
   }
   return result;
-}
-export function readLibrary(): { library: Library; error?: string } {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (!raw) return { library: {} };
-    const library = validateImport(JSON.parse(raw));
-    return { library };
-  } catch {
-    return {
-      library: {},
-      error:
-        "Не удалось прочитать библиотеку. Данные не перезаписаны. Попробуйте импортировать резервную копию.",
-    };
-  }
 }
 export function serialize(library: Library) {
   return JSON.stringify(

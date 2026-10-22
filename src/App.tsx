@@ -117,19 +117,28 @@ function Loading() {
     </div>
   );
 }
-function ErrorBox({ text, retry, children }: { text: string; retry?: () => void; children?: ReactNode }) {
+function downloadRecovery(raw: string) {
+  const url = URL.createObjectURL(new Blob([raw], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "knizhny-kompas-recovery.json";
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function ErrorBox({ text, retry, dismiss, children }: { text: string; retry?: () => void; dismiss?: () => void; children?: ReactNode }) {
   return (
     <div className="error" role="alert">
       <AlertCircle size={21} />
-      <div>
+      <div className="error-copy">
         <p>{text}</p>
-        {retry && (
+        <div className="error-actions">{retry && (
           <button className="text-button" onClick={retry}>
             Попробовать ещё раз
           </button>
         )}
-        {children}
+        {children}</div>
       </div>
+      {dismiss && <button className="notice-close" onClick={dismiss} aria-label="Закрыть сообщение о библиотеке"><X size={20} /></button>}
     </div>
   );
 }
@@ -1453,7 +1462,8 @@ export default function App() {
   const operations = useRef(new Map<number, symbol>());
   const failedMigrations = useRef(new Map<number, LibraryItem>());
   const [storageError, setStorageError] = useState(initial.error ?? initial.warning ?? "");
-  const [storageSource, setStorageSource] = useState(initial.raw);
+  const [storageSource, setStorageSource] = useState(initial.error || initial.warning ? initial.raw : undefined);
+  const [storageNoticeDismissed, setStorageNoticeDismissed] = useState(false);
   const [toast, setToast] = useState("");
   const [undo, setUndo] = useState<LibraryItem>();
   const timer = useRef<ReturnType<typeof setTimeout>>(undefined);
@@ -1486,6 +1496,7 @@ export default function App() {
         writeLibrary(next, undefined, allowRecovery);
         setStorageError("");
       } catch (error) {
+        setStorageNoticeDismissed(false);
         setStorageError(
           error instanceof Error && !(error instanceof DOMException)
             ? error.message
@@ -1636,24 +1647,18 @@ export default function App() {
         </div>
       </header>
       <main className="main" id="main">
-        {storageError && (
-          <ErrorBox text={storageError} retry={() => {
+        {storageError && !storageNoticeDismissed && (
+          <ErrorBox text={storageError} dismiss={() => setStorageNoticeDismissed(true)} retry={() => {
             const restored = readLibrary();
             setStorageSource(restored.raw);
             setStorageError(restored.error ?? restored.warning ?? "");
+            setStorageNoticeDismissed(false);
             if (!restored.error) {
               libraryRef.current = restored.library;
               setLibrary(restored.library);
             }
           }}>
-            {storageSource && <button className="text-button" onClick={() => {
-              const url = URL.createObjectURL(new Blob([storageSource], { type: "application/json" }));
-              const link = document.createElement("a");
-              link.href = url;
-              link.download = "knizhny-kompas-recovery.json";
-              link.click();
-              setTimeout(() => URL.revokeObjectURL(url), 1000);
-            }}>Скачать исходные данные для восстановления</button>}
+            {storageSource && <button className="text-button" onClick={() => downloadRecovery(storageSource)}>Скачать исходные данные для восстановления</button>}
           </ErrorBox>
         )}
         {cycleError && (
@@ -1699,6 +1704,13 @@ export default function App() {
           />
         ) : (
           <Recommendations {...common} />
+        )}
+        {route.page === "library" && !route.id && !route.author && storageSource && (
+          <details className="recovery-details">
+            <summary>Восстановление библиотеки</summary>
+            <p>Исходные данные доступны для восстановления нераспознанных записей. Закрытие уведомления их не удаляет.</p>
+            <button className="text-button" onClick={() => downloadRecovery(storageSource)}>Скачать исходные данные для восстановления</button>
+          </details>
         )}
       </main>
       <footer className="site-footer">

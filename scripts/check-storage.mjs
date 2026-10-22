@@ -45,6 +45,12 @@ try {
   const download = await downloaded;
   expect(await readFile(await download.path(), 'utf8')).toBe(partialRaw);
   expect(await partial.page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+  await partial.page.getByRole('button', { name: 'Закрыть сообщение о библиотеке' }).click();
+  await expect(partial.page.getByRole('alert')).toHaveCount(0);
+  await expect(partial.page.locator('.library-row')).toHaveCount(1);
+  expect(await partial.page.evaluate(k => localStorage.getItem(k), key)).toBe(partialRaw);
+  await partial.page.locator('.recovery-details summary').click();
+  await expect(partial.page.getByRole('button', { name: 'Скачать исходные данные для восстановления' })).toBeVisible();
   console.log('One invalid record preserves readable books and exact downloadable source; iPhone width OK');
   await partial.context.close();
 

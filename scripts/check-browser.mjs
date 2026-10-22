@@ -1,0 +1,19 @@
+import {chromium,devices,expect} from '@playwright/test';
+const base=process.env.BASE_URL||'http://localhost:5173';
+const browser=await chromium.launch({executablePath:'/usr/bin/chromium',args:['--no-sandbox']});
+try{
+const page=await browser.newPage({...devices['iPhone 13'],ignoreHTTPSErrors:true});page.setDefaultTimeout(45000);
+const failures=[];page.on('pageerror',e=>failures.push(e.message));
+await page.goto(base+'/?page=search');await page.getByRole('textbox',{name:'Название книги или имя автора'}).fill('Гиперион');await page.getByRole('button',{name:'Найти',exact:true}).click();await expect(page.locator('.book-card').first()).toBeVisible();console.log('Search OK');
+await page.locator('.book-card').filter({has:page.getByRole('heading',{name:'Гиперион',exact:true})}).first().locator('.book-open').click();await expect(page.locator('.work-intro h1')).toHaveText('Гиперион');await page.locator('#work-status').selectOption('read');console.log('Work and status OK');
+await page.locator('.cycle-path button').first().click();await expect(page.locator('.work-intro h1')).toHaveText('Песни Гипериона');console.log('Cycle:',await page.locator('.cycle-book h3').allTextContents());
+await page.locator('select[id^="cycle-2-"]').selectOption('read');await page.getByRole('navigation',{name:'Мобильная навигация'}).getByRole('button',{name:'Главная',exact:true}).click();await expect(page.locator('.next-card h3').first()).toHaveText('Эндимион');console.log('Next unread: Эндимион OK');
+await page.getByRole('navigation',{name:'Мобильная навигация'}).getByRole('button',{name:'Библиотека',exact:true}).click();await expect(page.locator('.library-row')).toHaveCount(2);await page.reload();await expect(page.locator('.library-row')).toHaveCount(2);console.log('Storage reload OK');
+const download=page.waitForEvent('download');await page.getByRole('button',{name:'Экспорт',exact:true}).click();const file=await download;await file.saveAs('/workspace/research/export.json');console.log('JSON export OK');
+await page.getByRole('button',{name:'Удалить «Гиперион» из библиотеки',exact:true}).click();await expect(page.locator('.library-row')).toHaveCount(1);await page.locator('input[type=file]').setInputFiles('/workspace/research/export.json');await expect(page.locator('.library-row')).toHaveCount(2);console.log('Delete and JSON import OK');
+await page.goto(base+'/?page=search');await page.getByRole('tab',{name:'Авторы',exact:true}).click();await page.getByRole('textbox',{name:'Название книги или имя автора'}).fill('Лем');await page.getByRole('button',{name:'Найти',exact:true}).click();await expect(page.locator('.author-card').first()).toBeVisible();console.log('Authors:',await page.locator('.author-card h3').allTextContents());
+await page.goto(base+'/?book=4325');await expect(page.locator('.work-intro h1')).toHaveText('Дюна');await page.getByRole('tab',{name:'Похожие книги',exact:true}).click();await expect(page.locator('.book-card').first()).toBeVisible();console.log('Similar books:',await page.locator('.book-card h3').allTextContents());
+await page.goto(base+'/');await expect(page.locator('.book-card').first()).toBeVisible();await page.waitForTimeout(2000);console.log('Covers:',await page.locator('.cover img').evaluateAll(imgs=>imgs.map(i=>({src:i.getAttribute('src'),loaded:i.complete&&i.naturalWidth>0}))));
+expect(await page.evaluate(()=>document.documentElement.scrollWidth<=document.documentElement.clientWidth)).toBeTruthy();await page.screenshot({path:'/workspace/research/mobile-verified.png',fullPage:true});expect(failures).toEqual([]);console.log('Mobile width and browser errors OK');
+const desktop=await browser.newPage({viewport:{width:1440,height:1000},ignoreHTTPSErrors:true});await desktop.goto(base+'/');await expect(desktop.locator('.book-card').first()).toBeVisible();await desktop.screenshot({path:'/workspace/research/desktop.png',fullPage:true});console.log('Desktop OK');
+}finally{await browser.close()}
